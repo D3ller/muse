@@ -175,6 +175,34 @@ public abstract class AudioFile {
     }
 
     /**
+     * @return the album artist, or {@code null} if unknown
+     */
+    public Artist getAlbumArtist() {
+        return this.albumArtist;
+    }
+
+    /**
+     * Sets the album artist from raw tag bytes.
+     *
+     * @param bytes   the raw album artist bytes
+     * @param charset the charset used to decode the bytes
+     */
+    public void setAlbumArtist(byte[] bytes, Charset charset) {
+        this.setAlbumArtist(this.transformBytesToStringAndTrim(bytes, charset));
+    }
+
+    /**
+     * Sets the album artist.
+     *
+     * @param albumArtistName the album artist name, {@code null} is used if {@code null} or blank
+     */
+    public void setAlbumArtist(String albumArtistName) {
+        this.albumArtist = albumArtistName == null || albumArtistName.isBlank()
+                ? null
+                : new Artist(albumArtistName.trim());
+    }
+
+    /**
      * Sets the year from raw tag bytes. Only the first 4 characters are read.
      *
      * @param bytes   the raw year bytes

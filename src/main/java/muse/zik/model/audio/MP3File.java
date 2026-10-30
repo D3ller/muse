@@ -33,6 +33,7 @@ public class MP3File extends AudioFile {
                 "name='" + this.getTitle() + '\'' +
                 ", artists=" + this.getArtists() +
                 ", album='" + this.getAlbum() + '\'' +
+                ", albumArtist=" + this.getAlbumArtist() +
                 ", year=" + this.getYear() +
                 ", trackNumber=" + this.getTrackNumber() +
                 ", discNumber=" + this.getDiscNumber() +
