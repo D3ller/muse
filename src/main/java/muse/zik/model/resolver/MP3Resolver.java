@@ -22,16 +22,16 @@ import java.util.stream.Stream;
 public class MP3Resolver implements Resolver<MP3File> {
 
     @Override
-    public MP3File resolve(File file) {
+    public MP3File resolve(File file) throws MuseException {
         try (FileInputStream inputStream = new FileInputStream(file)) {
             return this.detectFormat(file, inputStream.readAllBytes());
         } catch (IOException exception) {
-            return null;
+            throw new MuseException("No file detected");
         }
     }
 
     @Override
-    public List<MP3File> resolveFolder(File file) {
+    public List<MP3File> resolveFolder(File file) throws MuseException {
         List<MP3File> mp3Files = new ArrayList<>();
 
         try (Stream<Path> stream = Files.list(Path.of(file.getPath()))) {
@@ -46,6 +46,7 @@ public class MP3Resolver implements Resolver<MP3File> {
 
             for (Path path : filesPath) {
                 File currentFile = new File(path.toUri());
+                if (currentFile.isDirectory()) continue;
                 try (FileInputStream inputStream = new FileInputStream(currentFile)) {
                     byte[] filesBytes = inputStream.readAllBytes();
                     MP3File mp3File = this.detectFormat(currentFile, filesBytes);
@@ -53,7 +54,7 @@ public class MP3Resolver implements Resolver<MP3File> {
                 }
             }
         } catch (IOException e) {
-            System.err.println("Invalid path");
+            throw new MuseException("Invalid path");
         }
 
         return mp3Files;
@@ -61,6 +62,7 @@ public class MP3Resolver implements Resolver<MP3File> {
 
     /**
      * Initialize metadata to Unknown for each field;
+     *
      * @param file Original file
      * @return MP3File
      */
@@ -70,7 +72,8 @@ public class MP3Resolver implements Resolver<MP3File> {
 
     /**
      * Detect id3v1 tag from the files bytes
-     * @param file Original files
+     *
+     * @param file  Original files
      * @param bytes Files bytes
      * @return MP3files with information filled
      */
@@ -80,16 +83,16 @@ public class MP3Resolver implements Resolver<MP3File> {
         mp3File.setMetadataFormat(MetadataFormat.ID3V1);
 
         byte[] titleBytes = Arrays.copyOfRange(bytes, bytes.length - 125, bytes.length - 95);
-        mp3File.setTitle(titleBytes, StandardCharsets.UTF_8);
+        mp3File.setTitle(titleBytes, StandardCharsets.ISO_8859_1);
 
         byte[] artistByte = Arrays.copyOfRange(bytes, bytes.length - 95, bytes.length - 65);
-        mp3File.addArtist(artistByte, StandardCharsets.UTF_8);
+        mp3File.addArtist(artistByte, StandardCharsets.ISO_8859_1);
 
         byte[] albumBytes = Arrays.copyOfRange(bytes, bytes.length - 65, bytes.length - 35);
-        mp3File.setAlbum(albumBytes, StandardCharsets.UTF_8);
+        mp3File.setAlbum(albumBytes, StandardCharsets.ISO_8859_1);
 
         byte[] year = Arrays.copyOfRange(bytes, bytes.length - 35, bytes.length - 31);
-        mp3File.setYear(year, StandardCharsets.UTF_8);
+        mp3File.setYear(year, StandardCharsets.ISO_8859_1);
 
         return mp3File;
     }
@@ -103,7 +106,11 @@ public class MP3Resolver implements Resolver<MP3File> {
         int tagSize = ((sizeBytes[0] & 0x7F) << 21)
                 | ((sizeBytes[1] & 0x7F) << 14)
                 | ((sizeBytes[2] & 0x7F) << 7)
-                |  (sizeBytes[3] & 0x7F);
+                | (sizeBytes[3] & 0x7F);
+
+        if (tagSize > bytes.length - 10) {
+            throw new MuseException("ID3 tag exceeds file boundaries.");
+        }
 
         int tagEnd = 10 + tagSize;
         var currentFile = new MP3File(file, true);
@@ -119,11 +126,17 @@ public class MP3Resolver implements Resolver<MP3File> {
         } else if (majorVersion == 4) {
             // ID3v2.4 format
             currentFile.setMetadataFormat(MetadataFormat.ID3V2_4);
+        } else {
+            throw new MuseException("Invalid ID3 version.");
         }
 
         int up;
 
         for (int i = 10; i < tagEnd; i += up) {
+
+            if (i + headerFrameSize > tagEnd) {
+                throw new MuseException("Incomplete ID3 frame header.");
+            }
 
             var attributeName = new String(Arrays.copyOfRange(bytes, i, i + frameIdSize), StandardCharsets.UTF_8).trim();
             ByteBuffer buffer = ByteBuffer.wrap(bytes);
@@ -133,10 +146,19 @@ public class MP3Resolver implements Resolver<MP3File> {
             if (majorVersion == 2) {
                 frameSize = ((bytes[i + 3] & 0xFF) << 16)
                         | ((bytes[i + 4] & 0xFF) << 8)
-                        |  (bytes[i + 5] & 0xFF);
+                        | (bytes[i + 5] & 0xFF);
+            } else if (majorVersion == 4) {
+                frameSize = ((bytes[i + 4] & 0x7F) << 21) |
+                        ((bytes[i + 5] & 0x7F) << 14)
+                        | ((bytes[i + 6] & 0x7F) << 7)
+                        | (bytes[i + 7] & 0x7F);
             } else {
                 buffer.position(i + frameIdSize);
                 frameSize = buffer.getInt();
+            }
+
+            if (frameSize < 0 || frameSize > tagEnd - i - headerFrameSize) {
+                throw new MuseException("Invalid ID3 frame size.");
             }
 
             byte[] frameId = Arrays.copyOfRange(bytes, i, i + frameIdSize);
@@ -145,12 +167,12 @@ public class MP3Resolver implements Resolver<MP3File> {
             }
 
             var content = Arrays.copyOfRange(bytes, i + headerFrameSize, i + frameSize + headerFrameSize);
-            if(content.length == 0) {
+            if (content.length == 0) {
                 up = frameSize + headerFrameSize;
                 continue;
             }
 
-            if (!attributeName.startsWith("T")) {
+            if (!attributeName.startsWith("T") && !attributeName.equals("COMM")) {
                 up = frameSize + headerFrameSize;
                 continue;
             }
@@ -165,11 +187,16 @@ public class MP3Resolver implements Resolver<MP3File> {
 
             byte[] textBytes = Arrays.copyOfRange(content, 1, content.length);
 
+            //System.out.println(attributeName + " " + new String(textBytes, charset));
+
             switch (attributeName) {
+                case "COMM", "COM" -> currentFile.setComment(textBytes, charset);
                 case "TIT2", "TT2" -> currentFile.setTitle(textBytes, charset);
                 case "TPE1", "TP1" -> currentFile.addArtist(textBytes, charset);
                 case "TALB", "TAL" -> currentFile.setAlbum(textBytes, charset);
                 case "TYER", "TDRC", "TYE" -> currentFile.setYear(textBytes, charset);
+                case "TRCK", "TRK" -> currentFile.setTrackNumber(textBytes, charset);
+                case "TPOS", "TPA" -> currentFile.setDiscNumber(textBytes, charset);
             }
 
             up = frameSize + headerFrameSize;
@@ -178,6 +205,14 @@ public class MP3Resolver implements Resolver<MP3File> {
         return currentFile;
     }
 
+    /**
+     *
+     * This only choice is the first format found
+     *
+     * @param file  Original file
+     * @param bytes
+     * @return
+     */
     private MP3File detectFormat(File file, byte[] bytes) {
         if (bytes.length < 3) {
             return this.initializeMetaData(file);
@@ -186,7 +221,9 @@ public class MP3Resolver implements Resolver<MP3File> {
             return this.readId3v2(file, bytes);
         } else if (bytes.length <= 128) {
             return this.initializeMetaData(file);
-        } else if (Arrays.equals(new char[]{(char) bytes[bytes.length - 128], (char) bytes[bytes.length - 127], (char) bytes[bytes.length - 126]}, "TAG".toCharArray())) {
+        } else if (bytes[bytes.length - 128] == 'T'
+                && bytes[bytes.length - 127] == 'A'
+                && bytes[bytes.length - 126] == 'G') {
             return this.readId3v1(file, bytes);
         } else {
             return this.initializeMetaData(file);

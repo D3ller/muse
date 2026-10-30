@@ -17,8 +17,8 @@ public abstract class AudioFile {
     private String comment;
     private int trackNumber;
     private int discNumber;
-    private int duration;
-    private String albumArtist;
+    private long duration;
+    private Artist albumArtist;
     private byte[] albumCover;
 
     private final File file;
@@ -43,7 +43,7 @@ public abstract class AudioFile {
         this.trackNumber = -1;
         this.discNumber = -1;
         this.duration = -1;
-        this.albumArtist = "Unknown";
+        this.albumArtist = null;
         this.albumCover = null;
     }
 
@@ -136,7 +136,7 @@ public abstract class AudioFile {
         this.comment = this.trimAndRemoveInvalidChar(comment);
     }
 
-    public int getDuration() {
+    public long getDuration() {
         return duration;
     }
     public void setDuration(byte[] bytes, Charset charset) {
@@ -146,17 +146,42 @@ public abstract class AudioFile {
             return;
         }
         try {
-            this.duration = Integer.parseInt(stringDuration);
+            this.duration = Long.parseLong(stringDuration);
         } catch (NumberFormatException e) {
             this.duration = -1;
         }
     }
-    public void setDuration(int duration) {
+    public void setDuration(long duration) {
         if(duration < 0) {
             this.duration = -1;
             return;
         }
         this.duration = duration;
+    }
+
+    public int getDiscNumber() {
+        return discNumber;
+    }
+
+    public void setDiscNumber(int discNumber) {
+        if(discNumber < 0) {
+            this.discNumber = -1;
+            return;
+        }
+        this.discNumber = discNumber;
+    }
+
+    public void setDiscNumber(byte[] bytes, Charset charset) {
+        String stringDiscNumber = this.transformBytesToStringAndTrim(bytes, charset);
+        if(stringDiscNumber.isEmpty()) {
+            this.discNumber = -1;
+            return;
+        }
+        try {
+            this.discNumber = Integer.parseInt(stringDiscNumber);
+        } catch (NumberFormatException e) {
+            this.discNumber = -1;
+        }
     }
 
     public int getTrackNumber() {
@@ -196,11 +221,11 @@ public abstract class AudioFile {
                 .anyMatch(artist -> Objects.equals(artist.getName(), artistName));
     }
 
-    private String transformBytesToStringAndTrim(byte[] bytes, Charset charset) {
+    protected String transformBytesToStringAndTrim(byte[] bytes, Charset charset) {
         return new String(bytes, charset).replaceAll("\u0000+$", "").trim();
     }
 
-    private String trimAndRemoveInvalidChar(String s) {
+    protected String trimAndRemoveInvalidChar(String s) {
         return s.replaceAll("\u0000+$", "").trim();
     }
 
