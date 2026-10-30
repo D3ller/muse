@@ -128,7 +128,7 @@ public class MP3Resolver implements Resolver<MP3File> {
      * Read the id3v2 tag (2.2, 2.3 or 2.4) located at the start of the file.
      * <p>
      * Only text frames (starting with {@code T}) and the comment frame are read:
-     * title, artist, album, year, track number, disc number and comment.
+     * title, artist, album, album artist, year, track number, disc number and comment.
      *
      * @param file  Original file
      * @param bytes Files bytes
@@ -222,6 +222,7 @@ public class MP3Resolver implements Resolver<MP3File> {
                 case "TIT2", "TT2" -> currentFile.setTitle(textBytes, charset);
                 case "TPE1", "TP1" -> currentFile.addArtist(textBytes, charset);
                 case "TALB", "TAL" -> currentFile.setAlbum(textBytes, charset);
+                case "TPE2", "TP2" -> currentFile.setAlbumArtist(textBytes, charset);
                 case "TYER", "TDRC", "TYE" -> currentFile.setYear(textBytes, charset);
                 case "TRCK", "TRK" -> currentFile.setTrackNumber(textBytes, charset);
                 case "TPOS", "TPA" -> currentFile.setDiscNumber(textBytes, charset);
