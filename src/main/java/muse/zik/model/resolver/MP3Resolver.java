@@ -38,11 +38,11 @@ public class MP3Resolver implements Resolver<MP3File> {
     }
 
     /**
-     * Reads the metadata of every MP3 file ({@code audio/mpeg}) of a folder. Sub folders are ignored.
+     * Reads the metadata of every MP3 file of a folder. Sub folders are ignored.
      *
      * @param file the folder to scan
      * @return the MP3 files found in the folder
-     * @throws MuseException if the folder path is invalid or a file type cannot be probed
+     * @throws MuseException if the folder path is invalid
      */
     @Override
     public List<MP3File> resolveFolder(File file) throws MuseException {
@@ -50,17 +50,12 @@ public class MP3Resolver implements Resolver<MP3File> {
 
         try (Stream<Path> stream = Files.list(Path.of(file.getPath()))) {
             List<Path> filesPath = stream
-                    .filter(path -> {
-                        try {
-                            return Objects.equals(Files.probeContentType(path), "audio/mpeg");
-                        } catch (IOException e) {
-                            throw new MuseException("Unknown file type");
-                        }
-                    }).toList();
+                    .filter(Files::isRegularFile)
+                    .filter(this::isMp3)
+                    .toList();
 
             for (Path path : filesPath) {
-                File currentFile = new File(path.toUri());
-                if (currentFile.isDirectory()) continue;
+                File currentFile = path.toFile();
                 try (FileInputStream inputStream = new FileInputStream(currentFile)) {
                     byte[] filesBytes = inputStream.readAllBytes();
                     MP3File mp3File = this.detectFormat(currentFile, filesBytes);
@@ -72,6 +67,24 @@ public class MP3Resolver implements Resolver<MP3File> {
         }
 
         return mp3Files;
+    }
+
+    /**
+     * Check if a file is an MP3. The extension is checked first because
+     * {@link Files#probeContentType(Path)} depends on the OS and may not detect every MP3.
+     *
+     * @param path the file to check
+     * @return {@code true} if the file has the .mp3 extension or is detected as {@code audio/mpeg}
+     */
+    private boolean isMp3(Path path) {
+        if (path.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".mp3")) {
+            return true;
+        }
+        try {
+            return "audio/mpeg".equals(Files.probeContentType(path));
+        } catch (IOException e) {
+            return false;
+        }
     }
 
     /**
@@ -123,15 +136,15 @@ public class MP3Resolver implements Resolver<MP3File> {
      * @throws MuseException if the version is unsupported or the tag/frame sizes are invalid
      */
     private MP3File readId3v2(File file, byte[] bytes) {
+        if (bytes.length < 10) {
+            throw new MuseException("Incomplete ID3 header.");
+        }
+
         byte majorVersion = bytes[3];
-        byte[] sizeBytes = Arrays.copyOfRange(bytes, 6, 10);
         int headerFrameSize = 10;
         int frameIdSize = 4;
 
-        int tagSize = ((sizeBytes[0] & 0x7F) << 21)
-                | ((sizeBytes[1] & 0x7F) << 14)
-                | ((sizeBytes[2] & 0x7F) << 7)
-                | (sizeBytes[3] & 0x7F);
+        int tagSize = this.readSynchsafeInt(bytes, 6);
 
         if (tagSize > bytes.length - 10) {
             throw new MuseException("ID3 tag exceeds file boundaries.");
@@ -155,67 +168,57 @@ public class MP3Resolver implements Resolver<MP3File> {
             throw new MuseException("Invalid ID3 version.");
         }
 
-        int up;
+        int i = this.findFirstFrameOffset(bytes, majorVersion, tagEnd);
 
-        for (int i = 10; i < tagEnd; i += up) {
+        while (i < tagEnd) {
+
+            // Frame ids only use A-Z and 0-9, so a zero byte means the padding has started.
+            // It must be checked before reading a frame header, padding has none.
+            if (bytes[i] == 0) {
+                if (!this.isOnlyZeros(bytes, i, tagEnd)) {
+                    throw new MuseException("Invalid ID3 padding.");
+                }
+                break;
+            }
 
             if (i + headerFrameSize > tagEnd) {
                 throw new MuseException("Incomplete ID3 frame header.");
             }
 
-            var attributeName = new String(Arrays.copyOfRange(bytes, i, i + frameIdSize), StandardCharsets.UTF_8).trim();
-            ByteBuffer buffer = ByteBuffer.wrap(bytes);
+            var attributeName = new String(bytes, i, frameIdSize, StandardCharsets.ISO_8859_1);
+            if (!attributeName.matches("[A-Z0-9]+")) {
+                throw new MuseException("Invalid ID3 frame id.");
+            }
 
-            int frameSize;
-
-            if (majorVersion == 2) {
-                frameSize = ((bytes[i + 3] & 0xFF) << 16)
+            int frameSize = switch (majorVersion) {
+                case 2 -> ((bytes[i + 3] & 0xFF) << 16)
                         | ((bytes[i + 4] & 0xFF) << 8)
                         | (bytes[i + 5] & 0xFF);
-            } else if (majorVersion == 4) {
-                frameSize = ((bytes[i + 4] & 0x7F) << 21) |
-                        ((bytes[i + 5] & 0x7F) << 14)
-                        | ((bytes[i + 6] & 0x7F) << 7)
-                        | (bytes[i + 7] & 0x7F);
-            } else {
-                buffer.position(i + frameIdSize);
-                frameSize = buffer.getInt();
-            }
+                case 3 -> ByteBuffer.wrap(bytes, i + 4, 4).getInt();
+                default -> this.readSynchsafeInt(bytes, i + 4);
+            };
 
             if (frameSize < 0 || frameSize > tagEnd - i - headerFrameSize) {
                 throw new MuseException("Invalid ID3 frame size.");
             }
 
-            byte[] frameId = Arrays.copyOfRange(bytes, i, i + frameIdSize);
-            if (Arrays.equals(frameId, new byte[frameIdSize])) {
-                break;
-            }
-
             var content = Arrays.copyOfRange(bytes, i + headerFrameSize, i + frameSize + headerFrameSize);
+            i += headerFrameSize + frameSize;
+
             if (content.length == 0) {
-                up = frameSize + headerFrameSize;
                 continue;
             }
 
-            if (!attributeName.startsWith("T") && !attributeName.equals("COMM")) {
-                up = frameSize + headerFrameSize;
+            if (!attributeName.startsWith("T") && !attributeName.equals("COMM") && !attributeName.equals("COM")) {
                 continue;
             }
 
-            Charset charset = switch (content[0]) {
-                case 0 -> StandardCharsets.ISO_8859_1;
-                case 1 -> StandardCharsets.UTF_16;
-                case 2 -> StandardCharsets.UTF_16BE;
-                case 3 -> StandardCharsets.UTF_8;
-                default -> throw new IllegalArgumentException("Unknown text encoding " + content[0]);
-            };
+            Charset charset = this.resolveTextEncoding(content[0], majorVersion);
 
             byte[] textBytes = Arrays.copyOfRange(content, 1, content.length);
 
-            //System.out.println(attributeName + " " + new String(textBytes, charset));
-
             switch (attributeName) {
-                case "COMM", "COM" -> currentFile.setComment(textBytes, charset);
+                case "COMM", "COM" -> currentFile.setComment(this.extractComment(textBytes, charset), charset);
                 case "TIT2", "TT2" -> currentFile.setTitle(textBytes, charset);
                 case "TPE1", "TP1" -> currentFile.addArtist(textBytes, charset);
                 case "TALB", "TAL" -> currentFile.setAlbum(textBytes, charset);
@@ -223,11 +226,113 @@ public class MP3Resolver implements Resolver<MP3File> {
                 case "TRCK", "TRK" -> currentFile.setTrackNumber(textBytes, charset);
                 case "TPOS", "TPA" -> currentFile.setDiscNumber(textBytes, charset);
             }
-
-            up = frameSize + headerFrameSize;
         }
-        System.out.println(currentFile.toString());
         return currentFile;
+    }
+
+    /**
+     * Check the flags of the ID3 header and find where the first frame starts.
+     * <p>
+     * Unsynchronisation and ID3v2.2 compression change how the frames are stored and are not supported,
+     * so the tag is rejected instead of being parsed incorrectly. The extended header (v2.3/v2.4) is skipped.
+     *
+     * @param bytes        Files bytes
+     * @param majorVersion ID3v2 major version (2, 3 or 4)
+     * @param tagEnd       offset of the end of the tag
+     * @return offset of the first frame
+     * @throws MuseException if a flag is unknown or unsupported, or the extended header is invalid
+     */
+    private int findFirstFrameOffset(byte[] bytes, byte majorVersion, int tagEnd) {
+        int flags = bytes[5] & 0xFF;
+
+        int definedFlags = switch (majorVersion) {
+            case 2 -> 0x80 | 0x40;               // unsynchronisation, compression
+            case 3 -> 0x80 | 0x40 | 0x20;        // unsynchronisation, extended header, experimental
+            default -> 0x80 | 0x40 | 0x20 | 0x10; // same as v2.3 + footer
+        };
+
+        if ((flags & ~definedFlags) != 0) {
+            throw new MuseException("Unknown ID3 header flags.");
+        }
+        if ((flags & 0x80) != 0) {
+            throw new MuseException("ID3 unsynchronisation is not supported.");
+        }
+        if (majorVersion == 2 && (flags & 0x40) != 0) {
+            throw new MuseException("ID3v2.2 compression is not supported.");
+        }
+        if (majorVersion == 2 || (flags & 0x40) == 0) {
+            return 10;
+        }
+
+        if (tagEnd - 10 < 4) {
+            throw new MuseException("Incomplete ID3 extended header.");
+        }
+
+        // v2.3: the size excludes its own 4 bytes. v2.4: synchsafe size including itself.
+        int extendedHeaderEnd = majorVersion == 3
+                ? 14 + ByteBuffer.wrap(bytes, 10, 4).getInt()
+                : 10 + this.readSynchsafeInt(bytes, 10);
+
+        if (extendedHeaderEnd < 14 || extendedHeaderEnd > tagEnd) {
+            throw new MuseException("Invalid ID3 extended header size.");
+        }
+        return extendedHeaderEnd;
+    }
+
+    /**
+     * Read a 4 bytes synchsafe integer (7 bits per byte).
+     *
+     * @param bytes  Files bytes
+     * @param offset offset of the first byte
+     * @return the decoded integer
+     * @throws MuseException if a byte has its most significant bit set
+     */
+    private int readSynchsafeInt(byte[] bytes, int offset) {
+        int value = 0;
+        for (int k = offset; k < offset + 4; k++) {
+            if ((bytes[k] & 0x80) != 0) {
+                throw new MuseException("Invalid synchsafe integer.");
+            }
+            value = (value << 7) | bytes[k];
+        }
+        return value;
+    }
+
+    /**
+     * Convert the encoding byte of a text frame to a charset.
+     * ID3v2.2 and v2.3 only allow ISO-8859-1 (0) and UTF-16 (1), UTF-16BE (2) and UTF-8 (3) were added in v2.4.
+     *
+     * @param encoding     encoding byte of the frame
+     * @param majorVersion ID3v2 major version (2, 3 or 4)
+     * @return the charset of the text
+     * @throws MuseException if the encoding is unknown or not allowed for this version
+     */
+    private Charset resolveTextEncoding(byte encoding, byte majorVersion) {
+        if (encoding > 1 && majorVersion < 4) {
+            throw new MuseException("Text encoding " + encoding + " is not allowed in ID3v2." + majorVersion);
+        }
+        return switch (encoding) {
+            case 0 -> StandardCharsets.ISO_8859_1;
+            case 1 -> StandardCharsets.UTF_16;
+            case 2 -> StandardCharsets.UTF_16BE;
+            case 3 -> StandardCharsets.UTF_8;
+            default -> throw new MuseException("Unknown text encoding " + encoding);
+        };
+    }
+
+    /**
+     * @param bytes Files bytes
+     * @param from  first offset (inclusive)
+     * @param to    last offset (exclusive)
+     * @return {@code true} if every byte between {@code from} and {@code to} is zero
+     */
+    private boolean isOnlyZeros(byte[] bytes, int from, int to) {
+        for (int k = from; k < to; k++) {
+            if (bytes[k] != 0) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -254,5 +359,35 @@ public class MP3Resolver implements Resolver<MP3File> {
         } else {
             return this.initializeMetaData(file);
         }
+    }
+
+    private byte[] extractComment(byte[] bytes, Charset charset) {
+        if (bytes.length < 4) {
+            throw new MuseException("Invalid comment frame.");
+        }
+
+        int separatorSize = charset.equals(StandardCharsets.UTF_16)
+                || charset.equals(StandardCharsets.UTF_16BE) ? 2 : 1;
+
+        int commentStart = -1;
+
+        for (int i = 3; i <= bytes.length - separatorSize; i += separatorSize) {
+            boolean separator = bytes[i] == 0;
+
+            if (separatorSize == 2) {
+                separator = separator && bytes[i + 1] == 0;
+            }
+
+            if (separator) {
+                commentStart = i + separatorSize;
+                break;
+            }
+        }
+
+        if (commentStart == -1) {
+            throw new MuseException("Comment description separator not found.");
+        }
+
+        return Arrays.copyOfRange(bytes, commentStart, bytes.length);
     }
 }
