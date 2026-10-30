@@ -21,6 +21,13 @@ import java.util.stream.Stream;
  */
 public class MP3Resolver implements Resolver<MP3File> {
 
+    /**
+     * Reads the metadata of a single MP3 file.
+     *
+     * @param file the MP3 file to read
+     * @return the MP3 file filled with its metadata, or with "Unknown" values if no tag is found
+     * @throws MuseException if the file cannot be read or its tag is invalid
+     */
     @Override
     public MP3File resolve(File file) throws MuseException {
         try (FileInputStream inputStream = new FileInputStream(file)) {
@@ -30,6 +37,13 @@ public class MP3Resolver implements Resolver<MP3File> {
         }
     }
 
+    /**
+     * Reads the metadata of every MP3 file ({@code audio/mpeg}) of a folder. Sub folders are ignored.
+     *
+     * @param file the folder to scan
+     * @return the MP3 files found in the folder
+     * @throws MuseException if the folder path is invalid or a file type cannot be probed
+     */
     @Override
     public List<MP3File> resolveFolder(File file) throws MuseException {
         List<MP3File> mp3Files = new ArrayList<>();
@@ -97,6 +111,17 @@ public class MP3Resolver implements Resolver<MP3File> {
         return mp3File;
     }
 
+    /**
+     * Read the id3v2 tag (2.2, 2.3 or 2.4) located at the start of the file.
+     * <p>
+     * Only text frames (starting with {@code T}) and the comment frame are read:
+     * title, artist, album, year, track number, disc number and comment.
+     *
+     * @param file  Original file
+     * @param bytes Files bytes
+     * @return MP3File with information filled
+     * @throws MuseException if the version is unsupported or the tag/frame sizes are invalid
+     */
     private MP3File readId3v2(File file, byte[] bytes) {
         byte majorVersion = bytes[3];
         byte[] sizeBytes = Arrays.copyOfRange(bytes, 6, 10);
@@ -206,12 +231,13 @@ public class MP3Resolver implements Resolver<MP3File> {
     }
 
     /**
-     *
-     * This only choice is the first format found
+     * Detect which tag the file uses. Only the first format found is used:
+     * id3v2 if the file starts with "ID3", otherwise id3v1 if a "TAG" block ends the file,
+     * otherwise the metadata is initialized to Unknown.
      *
      * @param file  Original file
-     * @param bytes
-     * @return
+     * @param bytes Files bytes
+     * @return MP3File with information filled
      */
     private MP3File detectFormat(File file, byte[] bytes) {
         if (bytes.length < 3) {
