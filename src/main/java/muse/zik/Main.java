@@ -8,7 +8,8 @@ import java.util.List;
 
 public class Main {
 
-    static void main(String[] args) {
+
+    static void main() {
 
         File file = new File("src/main/resources/song");
         List<MP3File> mp3Resolver = new MP3Resolver().resolveFolder(file);
